@@ -24,9 +24,51 @@ var httpCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(httpCmd)
+	addHTTPFlags(httpCmd)
+	addHTTPVerbs(httpCmd, "http")
+}
 
-	httpCmd.PersistentFlags().StringArrayVarP(&headers, "header", "H", nil, "Custom headers (e.g. 'Authorization: Bearer token')")
-	httpCmd.PersistentFlags().DurationVarP(&timeout, "timeout", "t", 10*time.Second, "Request timeout")
+// addHTTPFlags registers the flags shared by the http and https commands.
+func addHTTPFlags(parent *cobra.Command) {
+	parent.PersistentFlags().StringArrayVarP(&headers, "header", "H", nil, "Custom headers (e.g. 'Authorization: Bearer token')")
+	parent.PersistentFlags().DurationVarP(&timeout, "timeout", "t", 10*time.Second, "Request timeout")
+}
+
+// normalizeURL prepends scheme:// when raw has no scheme.
+func normalizeURL(raw, scheme string) string {
+	if strings.Contains(raw, "://") {
+		return raw
+	}
+	return scheme + "://" + raw
+}
+
+// addHTTPVerbs adds get/post/put/delete subcommands to parent. A URL given
+// without a scheme gets defaultScheme prepended.
+func addHTTPVerbs(parent *cobra.Command, defaultScheme string) {
+	verbs := []struct {
+		name, method string
+		hasBody      bool
+	}{
+		{"get", nethttp.MethodGet, false},
+		{"post", nethttp.MethodPost, true},
+		{"put", nethttp.MethodPut, true},
+		{"delete", nethttp.MethodDelete, false},
+	}
+	for _, v := range verbs {
+		var body string
+		c := &cobra.Command{
+			Use:   v.name + " <url>",
+			Short: fmt.Sprintf("Send an %s %s request", strings.ToUpper(defaultScheme), v.method),
+			Args:  cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return sendRequest(v.method, normalizeURL(args[0], defaultScheme), body)
+			},
+		}
+		if v.hasBody {
+			c.Flags().StringVarP(&body, "data", "d", "", "Request body payload")
+		}
+		parent.AddCommand(c)
+	}
 }
 
 // sendRequest executes an HTTP request and prints the status and response body.

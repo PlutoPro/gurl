@@ -1,40 +1,105 @@
-/*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
-
-*/
 package cmd
 
 import (
+	"bufio"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-// imapCmd represents the imap command
-var imapCmd = &cobra.Command{
-	Use:   "imap",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+var (
+	imapOpts           netOpts
+	imapUser, imapPass string
+	imapMailbox        string
+	imapFetch          int
+	imapMailboxes      bool
+)
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("imap called")
+var imapCmd = &cobra.Command{
+	Use:   "imap <host>",
+	Short: "Read mail over IMAP (summarize a mailbox by default)",
+	Example: `  gurl imap imap.example.com --tls --user me --pass secret --mailboxes
+  gurl imap imap.example.com --tls --user me --pass secret --mailbox INBOX
+  gurl imap imap.example.com --tls --user me --pass secret --fetch 1`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if imapUser == "" {
+			return fmt.Errorf("--user is required")
+		}
+		conn, err := imapOpts.dial(args[0])
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		imapOpts.deadline(conn)
+		r := bufio.NewReader(conn)
+
+		if _, err := r.ReadString('\n'); err != nil { // greeting
+			return err
+		}
+
+		n := 0
+		// run sends a tagged command and prints/returns untagged lines until completion.
+		run := func(print bool, format string, a ...any) error {
+			n++
+			tag := fmt.Sprintf("a%d", n)
+			if _, err := fmt.Fprintf(conn, "%s %s\r\n", tag, fmt.Sprintf(format, a...)); err != nil {
+				return err
+			}
+			for {
+				line, err := r.ReadString('\n')
+				if err != nil {
+					return err
+				}
+				if strings.HasPrefix(line, tag+" ") {
+					if !strings.HasPrefix(line[len(tag)+1:], "OK") {
+						return fmt.Errorf("imap: %s", strings.TrimSpace(line))
+					}
+					return nil
+				}
+				if print {
+					fmt.Print(line)
+				}
+			}
+		}
+
+		if err := run(false, "LOGIN %s %s", imapQuote(imapUser), imapQuote(imapPass)); err != nil {
+			return fmt.Errorf("login failed: %w", err)
+		}
+		defer run(false, "LOGOUT")
+
+		switch {
+		case imapMailboxes:
+			return run(true, `LIST "" "*"`)
+		case imapFetch > 0:
+			if err := run(false, "SELECT %s", imapQuote(imapMailbox)); err != nil {
+				return err
+			}
+			return run(true, "FETCH %d BODY.PEEK[]", imapFetch)
+		default:
+			if err := run(false, "SELECT %s", imapQuote(imapMailbox)); err != nil {
+				return err
+			}
+			return run(true, "FETCH 1:* (FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+		}
 	},
+}
+
+// imapQuote returns s as an IMAP quoted string.
+func imapQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }
 
 func init() {
 	rootCmd.AddCommand(imapCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// imapCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// imapCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	addNetFlags(imapCmd, &imapOpts, 143)
+	f := imapCmd.Flags()
+	f.StringVar(&imapUser, "user", "", "Username")
+	f.StringVar(&imapPass, "pass", "", "Password")
+	f.StringVar(&imapMailbox, "mailbox", "INBOX", "Mailbox to open")
+	f.IntVar(&imapFetch, "fetch", 0, "Fetch full message number N")
+	f.BoolVar(&imapMailboxes, "mailboxes", false, "List mailboxes instead")
 }

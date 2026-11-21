@@ -1,40 +1,92 @@
-/*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
-
-*/
 package cmd
 
 import (
+	"crypto/tls"
 	"fmt"
+	"net"
+	"net/smtp"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-// smtpCmd represents the smtp command
-var smtpCmd = &cobra.Command{
-	Use:   "smtp",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+var (
+	smtpOpts                        netOpts
+	smtpFrom, smtpSubject, smtpBody string
+	smtpTo                          []string
+	smtpUser, smtpPass              string
+)
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("smtp called")
+var smtpCmd = &cobra.Command{
+	Use:   "smtp <host>",
+	Short: "Send an email via SMTP (STARTTLS used automatically when offered)",
+	Example: `  gurl smtp smtp.example.com -p 587 --user me --pass secret \
+      --from me@example.com --to you@example.com --subject Hi --body "Hello"`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if smtpFrom == "" || len(smtpTo) == 0 {
+			return fmt.Errorf("--from and at least one --to are required")
+		}
+		host := args[0]
+		addr := net.JoinHostPort(host, strconv.Itoa(smtpOpts.port))
+
+		conn, err := smtpOpts.dial(host)
+		if err != nil {
+			return err
+		}
+		smtpOpts.deadline(conn)
+		c, err := smtp.NewClient(conn, host)
+		if err != nil {
+			return fmt.Errorf("smtp handshake with %s: %w", addr, err)
+		}
+		defer c.Close()
+
+		if !smtpOpts.useTLS {
+			if ok, _ := c.Extension("STARTTLS"); ok {
+				if err := c.StartTLS(&tls.Config{ServerName: host, InsecureSkipVerify: smtpOpts.insecure}); err != nil {
+					return fmt.Errorf("starttls: %w", err)
+				}
+			}
+		}
+		if smtpUser != "" {
+			if err := c.Auth(smtp.PlainAuth("", smtpUser, smtpPass, host)); err != nil {
+				return fmt.Errorf("auth: %w", err)
+			}
+		}
+		if err := c.Mail(smtpFrom); err != nil {
+			return err
+		}
+		for _, to := range smtpTo {
+			if err := c.Rcpt(to); err != nil {
+				return fmt.Errorf("rcpt %s: %w", to, err)
+			}
+		}
+		w, err := c.Data()
+		if err != nil {
+			return err
+		}
+		msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s\r\n",
+			smtpFrom, strings.Join(smtpTo, ", "), smtpSubject, smtpBody)
+		if _, err := w.Write([]byte(msg)); err != nil {
+			return err
+		}
+		if err := w.Close(); err != nil {
+			return err
+		}
+		fmt.Println("Message sent")
+		return c.Quit()
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(smtpCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// smtpCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// smtpCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	addNetFlags(smtpCmd, &smtpOpts, 587)
+	f := smtpCmd.Flags()
+	f.StringVar(&smtpFrom, "from", "", "Sender address")
+	f.StringArrayVar(&smtpTo, "to", nil, "Recipient address (repeatable)")
+	f.StringVar(&smtpSubject, "subject", "", "Subject line")
+	f.StringVar(&smtpBody, "body", "", "Message body")
+	f.StringVar(&smtpUser, "user", "", "Username for AUTH PLAIN")
+	f.StringVar(&smtpPass, "pass", "", "Password for AUTH PLAIN")
 }

@@ -1,40 +1,38 @@
-/*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
-
-*/
 package cmd
 
 import (
-	"fmt"
+	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 )
 
-// gopherCmd represents the gopher command
-var gopherCmd = &cobra.Command{
-	Use:   "gopher",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+var gopherOpts netOpts
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("gopher called")
+var gopherCmd = &cobra.Command{
+	Use:   "gopher <host> [selector]",
+	Short: "Fetch a Gopher menu or document",
+	Args:  cobra.RangeArgs(1, 2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		selector := ""
+		if len(args) == 2 {
+			selector = args[1]
+		}
+		conn, err := gopherOpts.dial(args[0])
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		gopherOpts.deadline(conn)
+		if _, err := io.WriteString(conn, selector+"\r\n"); err != nil {
+			return err
+		}
+		_, err = io.Copy(os.Stdout, conn)
+		return err
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(gopherCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// gopherCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// gopherCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	addNetFlags(gopherCmd, &gopherOpts, 70)
 }

@@ -1,40 +1,81 @@
-/*
-Copyright © 2026 NAME HERE <EMAIL ADDRESS>
-
-*/
 package cmd
 
 import (
-	"fmt"
+	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 )
 
-// telnetCmd represents the telnet command
-var telnetCmd = &cobra.Command{
-	Use:   "telnet",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
+var telnetOpts netOpts
 
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("telnet called")
+var telnetCmd = &cobra.Command{
+	Use:   "telnet <host>",
+	Short: "Interactive raw TCP/telnet session (stdin <-> server)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		conn, err := telnetOpts.dial(args[0])
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			telnetCopy(os.Stdout, conn)
+		}()
+		go func() {
+			_, _ = io.Copy(conn, os.Stdin)
+			// stdin closed: let server finish replying
+		}()
+		<-done
+		return nil
 	},
+}
+
+// telnetCopy copies server output to w, answering option negotiation with refusals.
+func telnetCopy(w io.Writer, conn io.ReadWriter) {
+	const (
+		iac  = 255
+		dont = 254
+		do   = 253
+		wont = 252
+		will = 251
+	)
+	buf := make([]byte, 4096)
+	for {
+		n, err := conn.Read(buf)
+		out := make([]byte, 0, n)
+		for i := 0; i < n; i++ {
+			if buf[i] != iac {
+				out = append(out, buf[i])
+				continue
+			}
+			if i+1 < n && buf[i+1] == iac { // escaped 0xFF
+				out = append(out, iac)
+				i++
+				continue
+			}
+			if i+2 < n {
+				switch buf[i+1] {
+				case do:
+					_, _ = conn.Write([]byte{iac, wont, buf[i+2]})
+				case will:
+					_, _ = conn.Write([]byte{iac, dont, buf[i+2]})
+				}
+				i += 2
+			}
+		}
+		_, _ = w.Write(out)
+		if err != nil {
+			return
+		}
+	}
 }
 
 func init() {
 	rootCmd.AddCommand(telnetCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// telnetCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// telnetCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	addNetFlags(telnetCmd, &telnetOpts, 23)
+	telnetCmd.PersistentFlags().Lookup("timeout").Value.Set("30s")
 }
